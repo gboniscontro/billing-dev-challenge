@@ -1,4 +1,4 @@
-import { IsArray, IsDateString, IsNotEmpty, IsNumber, IsString } from 'class-validator';
+import { ArrayMinSize, IsArray, IsDateString, IsNotEmpty, IsNumber, IsString } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateBatchDto {
@@ -14,6 +14,7 @@ export class CreateBatchDto {
 
   @ApiProperty({ example: [1, 2, 3], description: 'Listado de IDs de BillingPending a facturar' })
   @IsArray()
+  @ArrayMinSize(1)
   @IsNumber({}, { each: true })
   @IsNotEmpty()
   pendingIds: number[];

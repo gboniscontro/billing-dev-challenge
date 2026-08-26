@@ -2,6 +2,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import * as request from 'supertest';
 import { AppModule } from '../src/app.module';
+import { HttpExceptionFilter } from '../src/common/filters/http-exception.filter';
 
 describe('Billing API integration', () => {
   let app: INestApplication;
@@ -20,6 +21,7 @@ describe('Billing API integration', () => {
         transform: true,
       }),
     );
+    app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
   });
 
@@ -67,13 +69,45 @@ describe('Billing API integration', () => {
       })
       .expect(400);
 
-    expect(response.body.message).toContain('al menos un pendiente');
+    expect(response.body.code).toBe('VALIDATION_ERROR');
+    expect(response.body.message).toBe('La solicitud contiene datos inválidos.');
+    expect(response.body.details).toEqual(expect.arrayContaining([expect.any(String)]));
+    expect(response.body).toHaveProperty('timestamp');
+    expect(response.body).toHaveProperty('path', '/billing/batches');
+  });
+
+  it('rechaza un filtro de cliente que no es numérico', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/billing/pendings?customerId=abc')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(400);
+
+    expect(response.body).toMatchObject({
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'La solicitud contiene datos inválidos.',
+    });
+    expect(response.body.details).toEqual(expect.arrayContaining([expect.any(String)]));
+  });
+
+  it('rechaza un identificador de lote que no es numérico', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/billing/batches/abc/export')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(400);
+
+    expect(response.body.code).toBe('BAD_REQUEST');
   });
 
   it('rechaza exportar un lote inexistente', async () => {
-    await request(app.getHttpServer())
+    const response = await request(app.getHttpServer())
       .get('/billing/batches/999999/export')
       .set('Authorization', `Bearer ${accessToken}`)
       .expect(404);
+
+    expect(response.body).toMatchObject({
+      statusCode: 404,
+      code: 'NOT_FOUND',
+    });
   });
 });

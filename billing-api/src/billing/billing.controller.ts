@@ -11,6 +11,8 @@ import {
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { BillingService } from './billing.service';
 import { CreateBatchDto } from './dto/create-batch.dto';
+import { BillingPendingQueryDto } from './dto/billing-pending-query.dto';
+import { InvoiceQueryDto } from './dto/invoice-query.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
 @ApiTags('billing')
@@ -23,15 +25,15 @@ export class BillingController {
   @Get('pendings')
   @ApiOperation({ summary: 'Obtener pendientes de facturación' })
   @ApiQuery({ name: 'customerId', required: false, type: Number, description: 'ID de cliente para filtrar (opcional)' })
-  getPendings(@Query('customerId') customerId?: number) {
-    return this.billingService.getPendings(customerId ? Number(customerId) : undefined);
+  getPendings(@Query() query: BillingPendingQueryDto) {
+    return this.billingService.getPendings(query.customerId);
   }
 
   @Get('invoices')
   @ApiOperation({ summary: 'Obtener facturas generadas' })
   @ApiQuery({ name: 'batchId', required: false, type: Number, description: 'Filtrar por lote' })
-  getInvoices(@Query('batchId') batchId?: number) {
-    return this.billingService.getInvoices(batchId ? Number(batchId) : undefined);
+  getInvoices(@Query() query: InvoiceQueryDto) {
+    return this.billingService.getInvoices(query.batchId);
   }
 
   @Post('services/:id/send-to-billing')

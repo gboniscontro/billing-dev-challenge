@@ -1,6 +1,148 @@
 # Challenge Técnico Fullstack - Nivel Senior
 ## Sistema de Facturación por Lote
 
+1. Decisiones de Modelado
+¿Cómo se relacionan las entidades?
+Service (1:1) BillingPending: Un servicio logístico genera un único registro de pendiente cuando alcanza el estado final de entrega.
+
+BillingBatch (1:N) Invoice: Un lote agrupa múltiples facturas o comprobantes emitidos en una misma ejecución manual.
+
+BillingPending (1:1) Invoice: Un pendiente de facturación se vincula directamente a una única factura generada.
+
+Relaciones en BD: La base de datos refuerza las relaciones uno a uno mediante índices únicos sobre serviceId y pendingId. Se utiliza también una entidad BillingSequence que mantiene el último número utilizado por cada talonario.
+
+¿Qué campos son obligatorios y por qué?
+BillingPending.status: Obligatorio (PENDING, INVOICED) para filtrar en forma directa qué filas son elegibles para cobro sin hacer scans completos de tablas.
+
+BillingBatch.receiptBook: Obligatorio para determinar el punto de venta / talonario contable sobre el cual calcular la correlatividad.
+
+Invoice.invoiceNumber: Obligatorio y único por talonario (0001-00000001) para cumplir con normativas fiscales.
+
+Invoice.cae: Obligatorio como identificador único de autorización del comprobante.
+
+Separación de dominios (Logística vs. Facturación)
+El dominio de logística finaliza su ciclo de vida cuando el estado alcanza DELIVERED. La entidad Service representa exclusivamente este dominio logístico y solo contiene estados operativos (PENDING -> IN_TRANSIT -> DELIVERED -> CANCELLED). No almacena estados de facturación, evitando así el acoplamiento.
+
+El dominio de facturación reacciona a los eventos de entrega creando filas en billing_pendings. Esto permite cambiar las reglas contables (impuestos, agrupaciones, refacturaciones) sin alterar el modelo de logística. BillingPending representa la decisión explícita de enviar un servicio a facturación, mientras que BillingBatch agrupa pendientes seleccionados manualmente, e Invoice conserva la factura emitida.
+
+Flujo API Implementado
+POST /billing/services/:id/send-to-billing: Crea un pendiente PENDING únicamente para servicios DELIVERED.
+
+POST /billing/batches: Procesa manualmente los pendientes seleccionados y genera las facturas.
+
+GET /billing/invoices: Consulta las facturas generadas, opcionalmente filtradas por lote.
+
+GET /billing/batches/:id/export: Prepara el payload normalizado para el ERP.
+
+POST /billing/batches/:id/sync: Simula el envío al ERP y registra el estado SYNCED con su fecha de sincronización.
+
+2. Concurrencia e Idempotencia
+
+Solución ante intentos simultáneos de facturación
+Para evitar race conditions (donde dos operadores procesen el mismo pendiente al mismo tiempo), se envuelve la lectura, validación, generación de facturas y actualización de estados en una única unidad atómica de trabajo utilizando dataSource.transaction.
+
+Además, se implementa Bloqueo Pesimista (Pessimistic Locking): se ejecuta un SELECT ... FOR UPDATE sobre los registros seleccionados en billing_pendings usando .setLock('pessimistic_write', undefined, ['pending']). Lo mismo ocurre con BillingSequence para proteger la secuencia del talonario. La base de datos bloquea las filas para cualquier otra transacción concurrente hasta que la actual haga COMMIT o ROLLBACK.
+
+Garantía de Idempotencia
+Antes de procesar, la transacción valida de forma explícita que ningún billing_pending tenga el estado INVOICED. Si otro proceso cambió el estado milisegundos antes, la transacción falla lanzando una excepción 409 Conflict y deshace cualquier cambio automáticamente. Además, las restricciones únicas de base de datos (serviceId, pendingId e invoiceNumber) protegen contra duplicados a nivel estructural.
+
+3. Alcance del Challenge
+Se priorizó implementar un flujo backend completo, sólido y testeable:
+
+Consistencia de datos y manejo de concurrencia en la facturación por lotes.
+
+Creación de pendientes, numeración secuencial por talonario y CAE simulado.
+
+Transformación de payload y simulación de sincronización para ERP contable.
+
+Cobertura de errores global estructurada y contratos claros de respuesta.
+
+El frontend y el procesamiento asíncrono real mediante colas se detallaron a nivel arquitectónico pero quedaron fuera del alcance de este MVP para priorizar la calidad técnica en el lado del servidor.
+
+4. Preparación de Datos para Sincronización con ERP
+Formato de Datos Diseñado
+Se diseñó una estructura DTO jerárquica con una cabecera de lote (erpHeader) y un listado plano de asientos contables (accountingEntries). Este formato separa claramente los metadatos del lote (la ejecución) de los registros contables individuales, permitiendo que un adaptador futuro lo transforme fácilmente al contrato XML/JSON específico del ERP real.
+
+Campos Incluidos y Justificación
+batchId & processedAt: Para trazabilidad del lote en el sistema de origen en caso de auditoría.
+
+externalInvoiceId & invoiceNumber: Para conciliación entre el ID interno de la API y el número de comprobante fiscal.
+
+cae: Requisito fiscal obligatorio para validaciones contables.
+
+customerId: Asignación del débito en la cuenta corriente del cliente en el ERP.
+
+amount: Monto nominal parseado como numérico decimal.
+
+serviceReferenceId: Trazabilidad operativa que permite navegar desde el asiento contable hacia el servicio logístico original.
+
+5. Procesamiento Asíncrono (Arquitectura Propuesta)
+(Estrategia diseñada para escalar la aplicación a miles de operaciones)
+
+Tecnología Sugerida: BullMQ / Redis o AWS SQS + Lambda.
+
+Estrategia Asíncrona: Cuando el volumen de datos escala a miles de facturas, el endpoint HTTP delega la ejecución publicando un mensaje en la cola. Un worker procesa el lote en segundo plano, ejecutando la lógica transaccional y actualizando el estado de BillingBatch de PENDING a PROCESSED o FAILED.
+
+Manejo de Errores y Reintentos: Se implementaría un Exponential Backoff para fallos temporales (timeouts de conexión al ERP o base de datos). Si el error es de negocio (validación fiscal), el mensaje pasa a una Dead Letter Queue (DLQ) y el lote se marca como FAILED, guardando la traza del problema en la columna errorMessage.
+
+6. Migraciones y Seeds
+Migraciones
+Las migraciones viven en src/migrations y gestionan la creación e índices de las tablas services, billing_pendings, billing_batches e invoices. Se ejecutan automáticamente mediante el servicio Docker migrations, el cual actúa como un contenedor init dentro de Compose, ejecutándose y finalizando antes de que el servidor principal de NestJS levante.
+
+Cada archivo de migración contiene comentarios claros explicando las tablas e índices modificados, el porqué de la decisión y el impacto en el esquema.
+
+Seeds (Datos de Prueba)
+El script de seed (src/seed.ts) limpia las tablas y reinicia las secuencias de IDs. Puebla la base con servicios logísticos en estado DELIVERED (con sus pendientes correspondientes generados) y un servicio en IN_TRANSIT para probar ambos caminos.
+
+Para ejecutarlo dentro del contenedor:
+
+Bash
+docker exec -it billing_challenge_api npm run seed
+
+7. Manejo de Errores
+La API utiliza un filtro global de excepciones para devolver un contrato consistente en todas las respuestas de error:
+
+JSON
+{
+  "statusCode": 404,
+  "code": "NOT_FOUND",
+  "message": "Lote con ID 999999 no encontrado.",
+  "details": null,
+  "timestamp": "2026-08-28T14:00:00.000Z",
+  "path": "/billing/batches/999999/export"
+}
+Códigos soportados: VALIDATION_ERROR, BAD_REQUEST, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT e INTERNAL_SERVER_ERROR.
+
+Niveles de validación: ValidationPipe rechaza los cuerpos/parámetros inválidos en el borde HTTP, mientras que el servicio mantiene sus propias guardas defensivas de negocio.
+
+Seguridad: Las excepciones inesperadas responden siempre con un mensaje genérico. Stack traces, consultas SQL o datos sensibles se registran únicamente en los logs del servidor.
+
+8. Autenticación (Mock de AWS Cognito)
+La API utiliza un mock de AWS Cognito para entorno de desarrollo que genera un JWT firmado localmente.
+
+Flujo de Autenticación
+El cliente ejecuta POST /auth/login enviando username y password.
+
+El mock devuelve un accessToken JWT.
+
+El cliente envía el token en cada endpoint protegido mediante el header:
+
+HTTP
+Authorization: Bearer <accessToken>
+JwtAuthGuard intercepta la solicitud y JwtStrategy valida la firma, expiración y payload del token.
+
+Configuración (.env)
+Fragmento de código
+JWT_SECRET=your-secret-key-change-in-production
+JWT_EXPIRES_IN=24h
+En un entorno de producción, este componente se reemplaza por el servicio Cognito de AWS validando firma (JWKS), issuer y audience.
+
+9. Mejoras Futuras
+Técnicas: Incorporar clave de idempotencia persistente por Request Header, implementar locks distribuidos (Redlock) al sincronizar con el ERP, y construir adaptadores específicos según el ERP de destino (SAP, Tango, etc.).
+
+Negocio/Operativas: Implementar autorización avanzada basada en roles (RBAC), filtros de búsqueda por rango de fechas en la API/UI, y un módulo de auditoría detallado para registrar qué usuario emitió cada lote.
+
+
 > **⚠️ Perfil Esperado**: Este challenge está orientado a perfiles **Senior con fuerte experiencia en Backend**. Aunque incluye un componente frontend (React), el foco de evaluación está en el diseño de dominio, arquitectura backend, manejo de errores, y decisiones técnicas del lado del servidor. Se espera que el candidato/a demuestre profundidad técnica en backend más que en frontend.
 
 ---
@@ -294,4 +436,5 @@ El repositorio `billing-api` incluye:
 ---
 
 **¡Éxito en el challenge!**
+
 

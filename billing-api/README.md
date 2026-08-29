@@ -111,51 +111,6 @@ npm run typeorm:migrate -- src/migrations/NombreMigracion
 npm test
 ```
 
-## Decisiones técnicas
-
-### Modelado y alcance
-
-`Service` representa el dominio logístico y solo contiene estados de servicio (`PENDING`, `IN_TRANSIT`, `DELIVERED`, `CANCELLED`). `BillingPending` representa la decisión explícita de enviar un servicio a facturación y contiene su estado de facturación. `BillingBatch` agrupa pendientes seleccionados manualmente, mientras `Invoice` conserva la factura emitida y su relación con el lote y el pendiente.
-
-Se priorizó el flujo backend completo: creación de pendientes, facturación manual, numeración por talonario, CAE simulado, exportación para ERP y sincronización simulada. Frontend y procesamiento asíncrono quedan fuera del alcance implementado.
-
-### Manejo de errores
-
-La API utiliza un filtro global para devolver un contrato consistente en todas las respuestas de error:
-
-```json
-{
-   "statusCode": 404,
-   "code": "NOT_FOUND",
-   "message": "Lote con ID 999999 no encontrado.",
-   "details": null,
-   "timestamp": "2026-08-26T14:00:00.000Z",
-   "path": "/billing/batches/999999/export"
-}
-```
-
-Los códigos principales son `VALIDATION_ERROR`, `BAD_REQUEST`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT` e `INTERNAL_SERVER_ERROR`. Los errores de validación incluyen sus mensajes en `details`; los errores de dominio conservan un mensaje descriptivo en español. Las excepciones inesperadas siempre responden con un mensaje genérico: stack traces, consultas SQL, credenciales y otros detalles internos solo se registran en el servidor.
-
-La validación se realiza en dos niveles. `ValidationPipe` rechaza cuerpos y parámetros inválidos en el borde HTTP, mientras que el servicio mantiene sus propias guardas para proteger el caso de uso cuando se invoca fuera de HTTP. Por eso, un lote vacío enviado por la API produce `VALIDATION_ERROR`, y la validación defensiva del servicio continúa cubriendo llamadas internas.
-
-### Concurrencia e idempotencia
-
-La facturación se ejecuta dentro de una transacción. Los pendientes y la secuencia del talonario se bloquean con locks pesimistas. Las restricciones únicas de `serviceId`, `pendingId` e `invoiceNumber` protegen contra duplicados incluso si llegan solicitudes concurrentes. En producción se agregaría una clave de idempotencia por solicitud y un registro de auditoría para reintentos.
-
-### Sincronización con ERP
-
-La exportación devuelve un encabezado con lote, talonario y cantidad, más asientos con identificador externo, número de factura, CAE, fecha, cliente, importe y referencia del servicio. Este formato separa metadatos del lote de los registros contables y permite que un adaptador futuro lo transforme al contrato del ERP real.
-
-### Migraciones y seeds
-
-Las migraciones viven en `src/migrations` y se ejecutan automáticamente mediante el servicio Docker `migrations` antes de `api`. El seed se ejecuta con `npm run seed`, limpia las tablas y secuencias, y crea servicios entregados con pendientes y un servicio en tránsito para probar ambos caminos.
-
-### Mejoras futuras
-
-Se incorporarían una clave de idempotencia persistente, lock explícito al sincronizar, autorización por roles, filtros por rango de fechas, auditoría, reintentos con cola y un adaptador para el ERP real.
-
----
-
 ## 📚 Más Información
 
 Para más detalles sobre:
